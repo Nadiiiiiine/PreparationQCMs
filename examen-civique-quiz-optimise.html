@@ -1,0 +1,1362 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Examen Civique - Quiz & Fiches</title>
+    <script src="https://cdn.tailwindcss.com">
+    </script>
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&display=swap" />
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+    <div id="app" class="min-h-screen bg-background text-foreground font-sans antialiased"></div>
+ <script src="questions.js"></script>
+ 
+     <!-- ========== COURS DATA (cours.js) ========== -->
+    <script src="cours.js"></script>
+    <!-- ========== DONNÉES :Examen blanc ========== -->
+    <script src="questions-db.js"></script>
+<!-- ========== QUESTIONS OFFICIELLES (fichier externe) ========== -->
+<script src="questionOfficiels.js"></script>
+    <!-- ========== MOTEUR QUIZ (quiz-engine.js) ========== -->
+    <script>
+        // Copie intégrale de quiz-engine.js
+        // (Fournie dans le fichier, à reproduire ici)
+        /* === MODULE PROGRESSION (localStorage) === */
+        const Progress = {
+            STORAGE_KEY: 'cc-progress',
+
+            _default: function() {
+                return { db: { 1: [], 2: [], 3: [], 4: [], 5: [] }, sit: { 1: [], 3: [] }, cr: { 1: [], 2: [], 3: [],
+                    4: [], 5: [] }, csp: { 1: [], 2: [], 3: [], 4: [], 5: [] }, nat: { 1: [], 2: [], 3: [], 4: [],
+                    5: [] } };
+            },
+
+            load: function() {
+                try {
+                    var data = localStorage.getItem(this.STORAGE_KEY);
+                    if (!data) return this._default();
+                    var parsed = JSON.parse(data);
+                    var def = this._default();
+                    for (var base in def) {
+                        if (!parsed[base]) parsed[base] = def[base];
+                        for (var theme in def[base]) {
+                            if (!parsed[base][theme]) parsed[base][theme] = [];
+                        }
+                    }
+                    return parsed;
+                } catch (e) { return this._default(); }
+            },
+
+            save: function(data) {
+                try { localStorage.setItem(this.STORAGE_KEY, JSON.stringify(data)); } catch (e) {}
+            },
+
+            recordSeen: function(questions) {
+                var data = this.load();
+                questions.forEach(function(q) {
+                    if (!q.id) return;
+                    var parts = q.id.split('-');
+                    var base = parts[0];
+                    var theme = parts[1];
+                    if (data[base] && data[base][theme] && data[base][theme].indexOf(q.id) === -1) {
+                        data[base][theme].push(q.id);
+                    }
+                });
+                this.save(data);
+                return data;
+            },
+
+            getCount: function(base, theme) {
+                var data = this.load();
+                return (data[base] && data[base][theme]) ? data[base][theme].length : 0;
+            },
+
+            getTotalCount: function(base) {
+                var data = this.load();
+                var total = 0;
+                if (data[base]) {
+                    for (var theme in data[base]) { total += data[base][theme].length; }
+                }
+                return total;
+            }
+        };
+
+        const QuizEngine = {
+            state: {
+                currentQuestions: [],
+                currentIndex: 0,
+                score: 0,
+                timer: null,
+                timeLeft: 0,
+                answersLog: [],
+                selectedIndex: null, // choix en cours pour la question affichée
+                answered: false      // la question affichée a-t-elle déjà été comptabilisée ?
+            },
+
+            config: {},
+
+            init: function(config) {
+                this.config = config;
+                window.app = this;
+            },
+
+            startQuiz: function() {
+                document.getElementById('confetti-container').innerHTML = '';
+                if (this.state.timer) clearInterval(this.state.timer);
+
+                this.state.currentQuestions = this.config.getQuestions();
+                this.prepareQuestions(this.config.numOptions || 4);
+
+                this.state.currentIndex = 0;
+                this.state.score = 0;
+                this.state.answersLog = [];
+                this.switchView('view-quiz');
+                this.renderQuestion();
+
+                if (this.config.timerSeconds) {
+                    this.state.timeLeft = this.config.timerSeconds;
+                    this.startTimer();
+                }
+            },
+
+            prepareQuestions: function(numOptions) {
+                this.state.currentQuestions = this.state.currentQuestions.map(q => {
+                    const correctText = q.o[q.c];
+                    let optionsPool = q.o.filter((_, i) => i !== q.c);
+                    optionsPool = this.shuffle(optionsPool).slice(0, numOptions - 1);
+                    let finalOptions = [correctText, ...optionsPool];
+                    finalOptions = this.shuffle(finalOptions);
+                    const newCorrectIndex = finalOptions.indexOf(correctText);
+
+                    return {
+                        ...q,
+                        displayOptions: finalOptions,
+                        correctIndex: newCorrectIndex
+                    };
+                });
+            },
+
+            renderQuestion: function() {
+                const q = this.state.currentQuestions[this.state.currentIndex];
+                const total = this.state.currentQuestions.length;
+                const isLast = this.state.currentIndex === total - 1;
+
+                this.state.selectedIndex = null;
+                this.state.answered = false;
+
+                document.getElementById('quiz-progress').innerText = `Question ${this.state.currentIndex + 1} / ${total}`;
+                const progress = ((this.state.currentIndex + 1) / total) * 100;
+                document.getElementById('progress-bar').style.width = progress + '%';
+
+                document.getElementById('question-text').innerText = q.q;
+
+                const optionsDiv = document.getElementById('options-list');
+                optionsDiv.innerHTML = '';
+
+                q.displayOptions.forEach((opt, idx) => {
+                    const btn = document.createElement('button');
+                    btn.className = 'option-btn';
+                    btn.innerText = opt;
+                    btn.setAttribute('aria-pressed', 'false');
+                    btn.onclick = () => this.handleAnswer(idx, btn);
+                    optionsDiv.appendChild(btn);
+                });
+
+                document.getElementById('feedback-area').classList.add('hidden');
+
+                // Le bouton "Suivant" reste désactivé tant qu'aucune option n'est choisie
+                // (évite de sauter une question sans réponse et de décaler la correction finale)
+                const nextBtn = document.getElementById('btn-next');
+                nextBtn.disabled = true;
+                nextBtn.innerText = isLast ? '🏁 Terminer →' : 'Question suivante →';
+
+                const container = document.getElementById('question-container');
+                container.style.animation = 'none';
+                setTimeout(() => {
+                    container.style.animation = '';
+                    if (this.state.currentIndex > 0) {
+                        const firstOption = document.querySelector('.option-btn');
+                        if (firstOption) firstOption.focus();
+                    }
+                }, 10);
+            },
+
+            // true (par défaut) = feedback immédiat après chaque question (quiz personnalisé)
+            // false = aucun feedback avant la fin, comme un examen réel (examen blanc)
+            isInstantFeedback: function() {
+                return this.config.instantFeedback !== false;
+            },
+
+            handleAnswer: function(selectedIndex, btnElement) {
+                this.state.selectedIndex = selectedIndex;
+
+                if (this.isInstantFeedback()) {
+                    this.revealAnswer(selectedIndex, btnElement);
+                    return;
+                }
+
+                // Mode examen blanc : on mémorise juste le choix, sans dire si c'est juste ou faux.
+                // L'utilisateur peut encore changer d'avis en cliquant une autre option.
+                document.querySelectorAll('.option-btn').forEach(b => {
+                    b.classList.remove('selected');
+                    b.setAttribute('aria-pressed', 'false');
+                });
+                btnElement.classList.add('selected');
+                btnElement.setAttribute('aria-pressed', 'true');
+                document.getElementById('btn-next').disabled = false;
+            },
+
+            revealAnswer: function(selectedIndex, btnElement) {
+                const btns = document.querySelectorAll('.option-btn');
+                btns.forEach(b => { b.style.pointerEvents = 'none';
+                    b.disabled = true; });
+
+                const q = this.state.currentQuestions[this.state.currentIndex];
+                const isCorrect = selectedIndex === q.correctIndex;
+
+                if (isCorrect) {
+                    btnElement.classList.add('correct');
+                    document.getElementById('feedback-title').innerText = "✓ Bonne réponse";
+                    document.getElementById('feedback-title').style.color = "#059669";
+                } else {
+                    btnElement.classList.add('incorrect');
+                    btns[q.correctIndex].classList.add('correct');
+                    document.getElementById('feedback-title').innerText = "✗ Mauvaise réponse";
+                    document.getElementById('feedback-title').style.color = "#dc2626";
+                }
+
+                this.logAnswer(selectedIndex);
+
+                document.getElementById('feedback-text').innerText = q.e;
+                document.getElementById('feedback-area').classList.remove('hidden');
+                const nextBtn = document.getElementById('btn-next');
+                nextBtn.disabled = false;
+                nextBtn.focus();
+                setTimeout(function() { window.scrollTo({ top: 0, behavior: 'smooth' }); }, 100);
+            },
+
+            // Enregistre la réponse (ou l'absence de réponse) à la question affichée.
+            // Protégé pour ne jamais compter deux fois la même question.
+            logAnswer: function(selectedIndex) {
+                if (this.state.answered) return;
+                const q = this.state.currentQuestions[this.state.currentIndex];
+                const answered = selectedIndex !== null && selectedIndex !== undefined;
+                const isCorrect = answered && selectedIndex === q.correctIndex;
+
+                if (isCorrect) this.state.score++;
+
+                this.state.answersLog.push({
+                    q: q.q,
+                    answered: answered,
+                    userCorrect: isCorrect,
+                    userText: answered ? q.displayOptions[selectedIndex] : null,
+                    correctText: q.displayOptions[q.correctIndex],
+                    e: q.e
+                });
+                this.state.answered = true;
+            },
+
+            nextQuestion: function() {
+                if (!this.isInstantFeedback()) {
+                    this.logAnswer(this.state.selectedIndex);
+                }
+                if (this.state.currentIndex < this.state.currentQuestions.length - 1) {
+                    this.state.currentIndex++;
+                    this.renderQuestion();
+                    window.scrollTo(0, 0);
+                } else {
+                    this.endQuiz(false);
+                }
+            },
+
+            endQuiz: function(timeOut = false) {
+                // Cas du temps écoulé en plein milieu d'une question : on enregistre
+                // quand même le choix en cours (ou "pas de réponse") avant de conclure.
+                if (!this.state.answered && this.state.currentQuestions.length > 0) {
+                    this.logAnswer(this.state.selectedIndex);
+                }
+                if (this.state.timer) clearInterval(this.state.timer);
+                this.switchView('view-results');
+
+                const total = this.state.currentQuestions.length;
+                const percent = Math.round((this.state.score / total) * 100);
+
+                document.getElementById('score-percent').innerText = percent + '%';
+                const ring = document.getElementById('score-ring');
+
+                let message = "";
+                let color = "";
+
+                if (timeOut) {
+                    document.getElementById('result-title').innerText = "Temps écoulé !";
+                    document.getElementById('result-subtitle').innerText = "Pas de panique, regardons ce que vous avez fait.";
+                } else {
+                    document.getElementById('result-title').innerText = "Terminé !";
+                    document.getElementById('result-subtitle').innerText = "Voici votre résultat.";
+                }
+
+                const messages = this.config.resultMessages || {
+                    high: "🎉 Félicitations ! Excellent résultat.",
+                    mid: "💪 Pas mal ! Encore quelques révisions.",
+                    low: "📚 Continuez à vous entraîner."
+                };
+
+                if (percent >= 80) {
+                    color = "#059669";
+                    message = messages.high;
+                    this.launchConfetti();
+                } else if (percent >= 50) {
+                    color = "#d97706";
+                    message = messages.mid;
+                } else {
+                    color = "#dc2626";
+                    message = messages.low;
+                }
+
+                document.getElementById('result-message').innerText = message;
+                ring.style.background = `conic-gradient(${color} ${percent}%, #e8ebf0 0)`;
+
+                if (this.config.progressConfig) {
+                    Progress.recordSeen(this.state.currentQuestions);
+                    this.renderProgressDashboard(this.config.progressConfig);
+                }
+
+                const list = document.getElementById('review-list');
+                list.innerHTML = '';
+                this.state.answersLog.forEach((log, i) => {
+                    const uid = 'expl-' + i;
+                    const explBtn = log.e ?
+                        `<button id="${uid}-btn" class="explain-toggle" onclick="var el=document.getElementById('${uid}');el.classList.toggle('hidden');this.classList.toggle('open');var isOpen=!el.classList.contains('hidden');this.setAttribute('aria-expanded',isOpen);this.textContent=isOpen?'Masquer l\\'explication ▾':'Voir l\\'explication ▸'" aria-expanded="false" aria-controls="${uid}">Voir l'explication ▸</button><div id="${uid}" class="explain-content hidden" role="region" aria-labelledby="${uid}-btn"><p>${log.e}</p></div>` :
+                        '';
+
+                    if (log.answered === false) {
+                        list.innerHTML += `
+                        <div class="result-item bad">
+                            <strong>Q${i+1}: ${log.q}</strong>
+                            <div style="margin-top:6px"><span style="color:#dc2626">⏭️ Pas de réponse</span></div>
+                            <div style="margin-top:2px"><span style="color:#64748b">Réponse attendue : ${log.correctText}</span></div>
+                            ${explBtn}
+                        </div>`;
+                    } else if (!log.userCorrect) {
+                        list.innerHTML += `
+                        <div class="result-item bad">
+                            <strong>Q${i+1}: ${log.q}</strong>
+                            <div style="margin-top:6px"><span style="color:#dc2626">Votre réponse : ${log.userText}</span></div>
+                            <div style="margin-top:2px"><span style="color:#64748b">Réponse attendue : ${log.correctText}</span></div>
+                            ${explBtn}
+                        </div>`;
+                    } else {
+                        list.innerHTML += `
+                        <div class="result-item good">
+                            <strong>Q${i+1}: ${log.q}</strong>
+                            <div style="margin-top:6px"><span style="color:#059669">Bonne réponse : ${log.correctText} ✓</span></div>
+                            ${explBtn}
+                        </div>`;
+                    }
+                });
+            },
+
+            renderProgressDashboard: function(progressConfig) {
+                var container = document.getElementById('progress-dashboard');
+                if (!container) return;
+
+                var themeNames = {
+                    1: 'Principes',
+                    2: 'Droits',
+                    3: 'Institutions',
+                    4: 'Vie citoyenne',
+                    5: 'Géo & UE'
+                };
+
+                var html = '<h3>Questions découvertes par thème</h3>';
+
+                progressConfig.bases.forEach(function(baseConfig) {
+                    var themes = baseConfig.themes;
+                    if (baseConfig.merge) {
+                        var totalAll = 0;
+                        var seenAll = 0;
+                        for (var t in themes) {
+                            totalAll += themes[t];
+                            seenAll += Progress.getCount(baseConfig.key, t);
+                        }
+                        var pct = totalAll > 0 ? Math.round((seenAll / totalAll) * 100) : 0;
+                        var barColor = pct === 0 ? '#94a3b8' : '#2b479b';
+                        html += '<div class="theme-row">';
+                        html += '<span class="theme-label">' + baseConfig.label + '</span>';
+                        html +=
+                            '<div class="theme-bar-bg"><div class="theme-bar-fill" style="width:' + pct +
+                            '%; background:' + barColor + ';"></div></div>';
+                        html += '<span class="theme-count">' + seenAll + '/' + totalAll + '</span>';
+                        html += '</div>';
+                        return;
+                    }
+
+                    for (var theme in themes) {
+                        var total = themes[theme];
+                        var seen = Progress.getCount(baseConfig.key, theme);
+                        var pct = total > 0 ? Math.round((seen / total) * 100) : 0;
+                        var label = baseConfig.label ? baseConfig.label : ('T' + theme + ' ' + (themeNames[
+                        theme] || ''));
+                        var isActive = progressConfig.activeTheme && baseConfig.key === progressConfig
+                            .activeBase && theme == progressConfig.activeTheme;
+                        var barColor = pct === 0 ? '#94a3b8' : '#2b479b';
+
+                        html += '<div class="theme-row">';
+                        html += '<span class="theme-label' + (isActive ? ' active' : '') + '">' + label +
+                        '</span>';
+                        html +=
+                            '<div class="theme-bar-bg"><div class="theme-bar-fill" style="width:' + pct +
+                            '%; background:' + barColor + ';"></div></div>';
+                        html += '<span class="theme-count">' + seen + '/' + total + '</span>';
+                        html += '</div>';
+                    }
+                });
+
+                html +=
+                    '<p class="save-notice">💾 Progression sauvegardée sur cet appareil.</p>';
+
+                container.innerHTML = html;
+                container.classList.remove('hidden');
+            },
+
+            launchConfetti: function() {
+                const container = document.getElementById('confetti-container');
+                const colors = ['#4DB6AC', '#FF8A65', '#66BB6A', '#FFD54F', '#BA68C8'];
+
+                for (let i = 0; i < 50; i++) {
+                    setTimeout(() => {
+                        const confetti = document.createElement('div');
+                        confetti.className = 'confetti';
+                        confetti.style.left = Math.random() * 100 + '%';
+                        confetti.style.backgroundColor = colors[Math.floor(Math.random() * colors.length)];
+                        confetti.style.animationDuration = (Math.random() * 2 + 2) + 's';
+                        confetti.style.width = confetti.style.height = (Math.random() * 10 + 5) + 'px';
+                        container.appendChild(confetti);
+
+                        setTimeout(() => confetti.remove(), 3000);
+                    }, i * 50);
+                }
+            },
+
+            retryQuiz: function() {
+                this.startQuiz();
+            },
+
+            switchView: function(viewId) {
+                document.querySelectorAll('.app-container > section').forEach(el => el.classList.add('hidden'));
+                document.getElementById(viewId).classList.remove('hidden');
+                window.scrollTo(0, 0);
+            },
+
+            shuffle: function(array) {
+                const arr = [...array];
+                for (let i = arr.length - 1; i > 0; i--) {
+                    const j = Math.floor(Math.random() * (i + 1));
+                    [arr[i], arr[j]] = [arr[j], arr[i]];
+                }
+                return arr;
+            },
+
+            showModal: function() {
+                this._lastFocused = document.activeElement;
+                const modal = document.getElementById('modal-abandon');
+                modal.classList.add('visible');
+                modal.querySelector('.modal-btn-cancel').focus();
+
+                this._modalKeyHandler = (e) => {
+                    if (e.key === 'Escape') {
+                        this.closeModal();
+                        return;
+                    }
+                    if (e.key === 'Tab') {
+                        const focusable = Array.from(modal.querySelectorAll('button'));
+                        const first = focusable[0];
+                        const last = focusable[focusable.length - 1];
+                        if (!focusable.includes(document.activeElement)) {
+                            e.preventDefault();
+                            first.focus();
+                        } else if (e.shiftKey && document.activeElement === first) {
+                            e.preventDefault();
+                            last.focus();
+                        } else if (!e.shiftKey && document.activeElement === last) {
+                            e.preventDefault();
+                            first.focus();
+                        }
+                    }
+                };
+                document.addEventListener('keydown', this._modalKeyHandler);
+            },
+
+            closeModal: function() {
+                document.getElementById('modal-abandon').classList.remove('visible');
+                if (this._modalKeyHandler) {
+                    document.removeEventListener('keydown', this._modalKeyHandler);
+                }
+                if (this._lastFocused) this._lastFocused.focus();
+            },
+confirmAbandon: function() {
+    if (this.state.timer) clearInterval(this.state.timer);
+    document.getElementById('confetti-container').innerHTML = '';
+    // Retour à la vue précédente si possible, sinon accueil
+    app.view = app.view === 'questions-officielles' ? 'questions-officielles' : (app.view === 'exam-blanc' ? 'exam-blanc' : 'home');
+    render();
+},
+
+            startTimer: function() {
+                const maxTime = this.config.timerSeconds;
+                const circle = document.getElementById('timer-circle');
+                const text = document.getElementById('timer-text');
+                const circumference = 2 * Math.PI * 22;
+
+                this.state.timer = setInterval(() => {
+                    this.state.timeLeft--;
+
+                    let m = Math.floor(this.state.timeLeft / 60);
+                    let s = this.state.timeLeft % 60;
+                    text.innerText = `${m}:${s < 10 ? '0'+s : s}`;
+
+                    const offset = circumference - (this.state.timeLeft / maxTime) * circumference;
+                    circle.style.strokeDashoffset = offset;
+
+                    if (this.state.timeLeft < 300) circle.style.stroke = "#d97706";
+                    if (this.state.timeLeft < 60) circle.style.stroke = "#dc2626";
+
+                    if (this.state.timeLeft <= 0) {
+                        clearInterval(this.state.timer);
+                        this.endQuiz(true);
+                    }
+                }, 1000);
+            }
+        };
+    </script>
+
+ 
+    <!-- ========== APPLICATION PRINCIPALE ========== -->
+    <script>
+        // ============================================================
+        // APP STATE
+        // ============================================================
+        const THEMES = [
+            { id: "principes-valeurs", title: "Principes et valeurs de la République", shortTitle: "Principes & Valeurs",
+                icon: "🏛️", description: "Devise, symboles, laïcité, libertés fondamentales" },
+            { id: "systeme-institutionnel", title: "Système institutionnel et politique", shortTitle: "Institutions",
+                icon: "⚖️", description: "Président, Parlement, collectivités, Union européenne" },
+            { id: "droits-devoirs", title: "Droits et devoirs", shortTitle: "Droits & Devoirs", icon: "📜",
+                description: "Droits fondamentaux, obligations, citoyenneté" },
+            { id: "histoire-geographie", title: "Histoire, géographie et culture", shortTitle: "Histoire & Culture",
+                icon: "🗺️", description: "Événements clés, géographie, patrimoine culturel" },
+            { id: "vie-societe", title: "Vivre dans la société française", shortTitle: "Vie quotidienne", icon: "🏠",
+                description: "Santé, travail, école, famille, vie pratique" }
+        ];
+
+        const app = {
+            view: 'home', // 'home' | 'cours' | 'exam-blanc'
+            selectedTheme: 'all',
+            selectedDifficulty: 'all',
+            filterType: 'all',
+            questionCount: 10,
+            coursTheme: null,
+
+            // Quiz engine sera utilisé via QuizEngine
+        };
+
+        // ============================================================
+        // RENDER FUNCTIONS
+        // ============================================================
+        function render() {
+            const container = document.getElementById('app');
+            if (!container) return;
+
+            if (app.view === 'home') {
+                container.innerHTML = renderHome();
+            } else if (app.view === 'cours') {
+                container.innerHTML = renderCours();
+            } else if (app.view === 'exam-blanc') {
+                container.innerHTML = renderExamBlanc();
+			} else if (app.view === 'questions-officielles') {
+				container.innerHTML = renderQuestionsOfficielles();
+            } else {
+                // Si une vue quiz est active, elle est gérée par QuizEngine
+                // On ne fait rien ici, le conteneur est déjà rempli par le moteur
+                // Mais on doit s'assurer que la structure est présente
+                // On laisse le HTML géré par le moteur
+            }
+
+            bindEvents();
+        }
+
+        // === NAVIGATION (onglets) ===
+        function renderNav() {
+            const tabs = [
+                { id: 'home', label: '🏠 Accueil' },
+                { id: 'cours', label: '📖 Cours' },
+                { id: 'exam-blanc', label: '🎯 Examen blanc' },
+				{ id: 'questions-officielles', label: '📋 Questions officielles' },
+
+            ];
+            return `
+            <nav class="flex flex-wrap items-center gap-2 mb-5 border-b border-border pb-4">
+              ${tabs.map(t => `
+                <button class="nav-tab ${app.view === t.id ? 'active' : ''}" data-nav="${t.id}">
+                  ${t.label}
+                </button>
+              `).join('')}
+            </nav>
+          `;
+        }
+
+        // === PAGE ACCUEIL (quiz personnalisé) ===
+        function renderHome() {
+            const filtered = getFilteredQuestions();
+            const total = DB.length + DB_SITUATIONS.length;
+            const themesWithCount = THEMES.map(t => {
+                const count = DB.filter(q => q.t === THEMES.findIndex(th => th.id === t.id) + 1).length +
+                    DB_SITUATIONS.filter(q => q.t === THEMES.findIndex(th => th.id === t.id) + 1).length;
+                return { ...t, count };
+            });
+
+            const easyCount = DB.filter(q => q.lvl === 'B1').length + DB_SITUATIONS.filter(q => q.lvl === 'B1' || !q.lvl)
+            .length;
+            const mediumCount = DB.filter(q => q.lvl === 'B2').length;
+            const hardCount = DB.filter(q => q.lvl === 'C1').length;
+            const situationalCount = DB_SITUATIONS.length;
+
+            const maxCount = Math.min(50, filtered.length);
+            const countOptions = [5, 10, 15, 20, 30, 40, 50].filter(n => n <= maxCount);
+            if (countOptions.length === 0) countOptions.push(maxCount || 5);
+
+            return `
+            <div class="min-h-screen bg-background text-foreground">
+              <div class="mx-auto max-w-1400 px-3 py-4 sm:px-4 md:px-6 md:py-6">
+                <div class="rounded-4xl border border-border bg-panel p-3 shadow-panel sm:p-4 md:p-5">
+                  ${renderNav()}
+
+                  <section class="mb-6">
+                    <div class="relative overflow-hidden rounded-4xl bg-navy px-5 py-6 text-white sm:px-6 md:px-8 md:py-7">
+                      <div class="pointer-events-none absolute inset-0 opacity-[0.06] [background-image:linear-gradient(to_right,white_1px,transparent_1px),linear-gradient(to_bottom,white_1px,transparent_1px)] [background-size:60px_60px]"></div>
+                      <div class="relative">
+                        <div class="mb-3 inline-flex items-center gap-2 rounded-full border border-white/15 bg-white/[0.08] px-3 py-1.5 text-[11px] font-medium text-slate-200 backdrop-blur-sm">
+                          <span>📚</span>
+                          <span>${total} questions officielles</span>
+                        </div>
+                        <h1 class="text-[2rem] font-medium leading-[0.98] tracking-tight text-white sm:text-[2.4rem] md:text-[3rem]">
+                          Entraînez-vous avec<br>des quiz personnalisés
+                        </h1>
+                        <p class="mt-3 max-w-2xl text-sm leading-relaxed text-slate-200 sm:text-base">
+                          Choisissez un thème, une difficulté, un type de question et lancez le quiz.
+                        </p>
+                      </div>
+                    </div>
+                  </section>
+
+                  <section class="mb-6 rounded-3xl border border-border bg-white p-5 shadow-card">
+                    <div class="mb-4 flex items-center gap-2">
+                      <span class="text-primary text-sm font-semibold">🎯 Filtres</span>
+                    </div>
+
+                    <!-- Theme -->
+                    <div class="mb-4">
+                      <p class="mb-2 text-xs font-semibold uppercase tracking-[0.16em] text-muted-foreground">Thème</p>
+                      <div class="flex flex-wrap gap-2">
+                        <button class="theme-chip ${app.selectedTheme === 'all' ? 'active' : ''}" data-theme="all">📚 Tous</button>
+                        ${themesWithCount.map(t => `
+                          <button class="theme-chip ${app.selectedTheme === t.id ? 'active' : ''}" data-theme="${t.id}">${t.icon} ${t.shortTitle} (${t.count})</button>
+                        `).join('')}
+                      </div>
+                    </div>
+
+                    <!-- Difficulty -->
+                    <div class="mb-4">
+                      <p class="mb-2 text-xs font-semibold uppercase tracking-[0.16em] text-muted-foreground">Difficulté</p>
+                      <div class="flex flex-wrap gap-2">
+                        <button class="theme-chip ${app.selectedDifficulty === 'all' ? 'active' : ''}" data-difficulty="all">🎯 Toutes</button>
+                        <button class="theme-chip ${app.selectedDifficulty === 'B1' ? 'active' : ''}" data-difficulty="B1">🟢 Facile (${easyCount})</button>
+                        <button class="theme-chip ${app.selectedDifficulty === 'B2' ? 'active' : ''}" data-difficulty="B2">🟡 Moyen (${mediumCount})</button>
+                        <button class="theme-chip ${app.selectedDifficulty === 'C1' ? 'active' : ''}" data-difficulty="C1">🔴 Difficile (${hardCount})</button>
+                      </div>
+                    </div>
+
+                    <!-- Type -->
+                    <div class="mb-4">
+                      <p class="mb-2 text-xs font-semibold uppercase tracking-[0.16em] text-muted-foreground">Type de question</p>
+                      <div class="flex flex-wrap gap-2">
+                        <button class="theme-chip ${app.filterType === 'all' ? 'active' : ''}" data-type="all">📋 Toutes</button>
+                        <button class="theme-chip ${app.filterType === 'general' ? 'active' : ''}" data-type="general">📄 Général</button>
+                        <button class="theme-chip ${app.filterType === 'situational' ? 'active' : ''}" data-type="situational">🧩 Mise en situation (${situationalCount})</button>
+                      </div>
+                    </div>
+
+                    <!-- Count -->
+                    <div>
+                      <p class="mb-2 text-xs font-semibold uppercase tracking-[0.16em] text-muted-foreground">Nombre de questions</p>
+                      <div class="flex flex-wrap gap-2">
+                        ${countOptions.map(n => `
+                          <button class="theme-chip ${app.questionCount === n ? 'active' : ''}" data-count="${n}">${n}</button>
+                        `).join('')}
+                        <div class="relative">
+                          <input type="number" id="custom-count" min="1" max="${maxCount}" value="${app.questionCount}" 
+                                 class="w-20 rounded-full border-2 border-border px-3 py-1.5 text-sm text-center focus:border-primary focus:outline-none" />
+                        </div>
+                      </div>
+                      <p class="mt-2 text-xs text-muted-foreground">${filtered.length} questions disponibles</p>
+                    </div>
+                  </section>
+
+                  <div class="flex flex-col sm:flex-row gap-3 sm:items-center sm:justify-between">
+                    <div class="text-sm text-muted-foreground">
+                      ${app.questionCount > filtered.length ? `<span class="text-amber-600">⚠️ ${app.questionCount} demandées, ${filtered.length} disponibles</span>` : `${app.questionCount} questions sélectionnées`}
+                    </div>
+                    <button id="start-quiz-btn" class="btn-primary min-h-[48px] px-8 text-base shadow-glow" ${filtered.length === 0 ? 'disabled' : ''}>
+                      🚀 Lancer le quiz
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          `;
+        }
+
+        // === PAGE COURS (fiches) ===
+        function renderCours() {
+            if (app.coursTheme) {
+                return renderCoursDetail(app.coursTheme);
+            }
+
+            return `
+            <div class="min-h-screen bg-background text-foreground">
+              <div class="mx-auto max-w-1400 px-3 py-4 sm:px-4 md:px-6 md:py-6">
+                <div class="rounded-4xl border border-border bg-panel p-3 shadow-panel sm:p-4 md:p-5">
+                  ${renderNav()}
+
+                  <section class="mb-6">
+                    <div class="relative overflow-hidden rounded-4xl bg-navy px-5 py-6 text-white sm:px-6 md:px-8 md:py-7">
+                      <div class="pointer-events-none absolute inset-0 opacity-[0.06] [background-image:linear-gradient(to_right,white_1px,transparent_1px),linear-gradient(to_bottom,white_1px,transparent_1px)] [background-size:60px_60px]"></div>
+                      <div class="relative">
+                        <h1 class="text-[2rem] font-medium leading-[0.98] tracking-tight text-white sm:text-[2.4rem] md:text-[3rem]">
+                          📖 Fiches de révision
+                        </h1>
+                        <p class="mt-3 max-w-2xl text-sm leading-relaxed text-slate-200 sm:text-base">
+                          Consultez les résumés par thème pour réviser les notions clés.
+                        </p>
+                      </div>
+                    </div>
+                  </section>
+
+                  <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                    ${THEMES.map(t => {
+                      const data = COURS_DATA[t.id];
+                      if (!data) return '';
+                      return `
+                        <div class="rounded-3xl border border-border bg-white p-5 shadow-card hover:shadow-lg transition-all cursor-pointer" data-cours-theme="${t.id}">
+                          <div class="text-4xl mb-2">${data.icon}</div>
+                          <h2 class="text-xl font-bold text-foreground">${data.title}</h2>
+                          <p class="text-sm text-muted-foreground mt-1 line-clamp-2">${data.summary}</p>
+                          <div class="mt-3 flex flex-wrap gap-1">
+                            <span class="text-xs bg-accent px-2 py-1 rounded-full text-primary">${data.keyPoints.length} points</span>
+                            <span class="text-xs bg-muted px-2 py-1 rounded-full text-muted-foreground">${data.dates?.length || 0} dates</span>
+                          </div>
+                          <button class="mt-4 text-sm font-semibold text-primary hover:underline">Voir la fiche →</button>
+                        </div>
+                      `;
+                    }).join('')}
+                  </div>
+                </div>
+              </div>
+            </div>
+          `;
+        }
+
+        function renderCoursDetail(themeId) {
+            const data = COURS_DATA[themeId];
+            const theme = THEMES.find(t => t.id === themeId);
+            if (!data) return `<div>Fiche introuvable</div>`;
+
+            return `
+            <div class="min-h-screen bg-background text-foreground">
+              <div class="mx-auto max-w-4xl px-3 py-4 sm:px-4 md:px-6 md:py-6">
+                <div class="rounded-4xl border border-border bg-panel p-3 shadow-panel sm:p-4 md:p-5">
+                  ${renderNav()}
+
+                  <button class="mb-4 text-sm font-medium text-muted-foreground hover:text-primary flex items-center gap-1" data-cours-back>
+                    ← Retour aux fiches
+                  </button>
+
+                  <div class="rounded-3xl border border-border bg-white p-6 shadow-card">
+                    <div class="flex items-center gap-3 mb-2">
+                      <span class="text-4xl">${data.icon}</span>
+                      <h1 class="text-2xl font-bold text-foreground">${data.title}</h1>
+                    </div>
+                    <p class="text-base text-muted-foreground mb-6">${data.summary}</p>
+
+                    <div class="mb-6">
+                      <h3 class="text-lg font-semibold text-foreground mb-3">📌 Points clés</h3>
+                      <ul class="space-y-2">
+                        ${data.keyPoints.map(p => `<li class="flex items-start gap-2 text-sm text-foreground"><span class="text-primary mt-0.5">•</span> ${p}</li>`).join('')}
+                      </ul>
+                    </div>
+
+                    ${data.dates ? `
+                      <div class="mb-6">
+                        <h3 class="text-lg font-semibold text-foreground mb-3">📅 Dates importantes</h3>
+                        <ul class="space-y-1">
+                          ${data.dates.map(d => `<li class="text-sm text-foreground">• ${d}</li>`).join('')}
+                        </ul>
+                      </div>
+                    ` : ''}
+
+                    ${data.figures ? `
+                      <div>
+                        <h3 class="text-lg font-semibold text-foreground mb-3">👤 Personnalités</h3>
+                        <ul class="space-y-1">
+                          ${data.figures.map(f => `<li class="text-sm text-foreground">• ${f}</li>`).join('')}
+                        </ul>
+                      </div>
+                    ` : ''}
+
+                    <div class="mt-6 pt-4 border-t border-border">
+                      <button class="btn-outline text-sm" data-cours-back>← Retour aux fiches</button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          `;
+        }
+
+        // === PAGE EXAMEN BLANC ===
+        function renderExamBlanc() {
+            const totalQuestions = DB.length + DB_SITUATIONS.length;
+            return `
+            <div class="min-h-screen bg-background text-foreground">
+              <div class="mx-auto max-w-1400 px-3 py-4 sm:px-4 md:px-6 md:py-6">
+                <div class="rounded-4xl border border-border bg-panel p-3 shadow-panel sm:p-4 md:p-5">
+                  ${renderNav()}
+
+                  <section class="mb-6">
+                    <div class="relative overflow-hidden rounded-4xl bg-navy px-5 py-6 text-white sm:px-6 md:px-8 md:py-7">
+                      <div class="pointer-events-none absolute inset-0 opacity-[0.06] [background-image:linear-gradient(to_right,white_1px,transparent_1px),linear-gradient(to_bottom,white_1px,transparent_1px)] [background-size:60px_60px]"></div>
+                      <div class="relative">
+                        <div class="mb-3 inline-flex items-center gap-2 rounded-full border border-white/15 bg-white/[0.08] px-3 py-1.5 text-[11px] font-medium text-slate-200 backdrop-blur-sm">
+                          <span>⏱️</span>
+                          <span>Examen blanc officiel</span>
+                        </div>
+                        <h1 class="text-[2rem] font-medium leading-[0.98] tracking-tight text-white sm:text-[2.4rem] md:text-[3rem]">
+                          Simulez l'examen<br>en conditions réelles
+                        </h1>
+                        <p class="mt-3 max-w-2xl text-sm leading-relaxed text-slate-200 sm:text-base">
+                          ${totalQuestions} questions disponibles. 40 questions aléatoires, chronométrées (45 minutes).
+                          Il faut 80% de bonnes réponses pour réussir.
+                        </p>
+                      </div>
+                    </div>
+                  </section>
+
+                  <div class="flex flex-col items-center gap-6">
+                    <div class="rounded-3xl border border-border bg-white p-6 max-w-md w-full shadow-card text-center">
+                      <div class="text-5xl mb-4">🎯</div>
+                      <h2 class="text-2xl font-bold text-foreground">Prêt à vous tester ?</h2>
+                      <p class="text-muted-foreground mt-2">40 questions aléatoires · 45 minutes · 80% pour réussir</p>
+                      <button id="start-exam-blanc" class="btn-primary w-full mt-4 min-h-[48px] text-base">
+                        🚀 Lancer l'examen blanc
+                      </button>
+                    </div>
+
+                    <!-- Zone de progression (sera affichée après le quiz) -->
+                    <div id="progress-dashboard" class="w-full max-w-md"></div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          `;
+        }
+
+// === PAGE QUESTIONS OFFICIELLES ===
+function renderQuestionsOfficielles() {
+    const total = (typeof QUESTIONS_OFFICIELLES !== 'undefined') ? QUESTIONS_OFFICIELLES.length : 0;
+    const byTheme = [1,2,3,4,5].map(t => ({
+        n: t,
+        count: (typeof QUESTIONS_OFFICIELLES !== 'undefined')
+            ? QUESTIONS_OFFICIELLES.filter(q => q.t === t).length
+            : 0
+    }));
+
+    return `
+    <div class="min-h-screen bg-background text-foreground">
+      <div class="mx-auto max-w-1400 px-3 py-4 sm:px-4 md:px-6 md:py-6">
+        <div class="rounded-4xl border border-border bg-panel p-3 shadow-panel sm:p-4 md:p-5">
+          ${renderNav()}
+
+          <section class="mb-6">
+            <div class="relative overflow-hidden rounded-4xl bg-navy px-5 py-6 text-white sm:px-6 md:px-8 md:py-7">
+              <div class="pointer-events-none absolute inset-0 opacity-[0.06] [background-image:linear-gradient(to_right,white_1px,transparent_1px),linear-gradient(to_bottom,white_1px,transparent_1px)] [background-size:60px_60px]"></div>
+              <div class="relative">
+                <div class="mb-3 inline-flex items-center gap-2 rounded-full border border-white/15 bg-white/[0.08] px-3 py-1.5 text-[11px] font-medium text-slate-200 backdrop-blur-sm">
+                  <span>📋</span>
+                  <span>${total} questions officielles</span>
+                </div>
+                <h1 class="text-[2rem] font-medium leading-[0.98] tracking-tight text-white sm:text-[2.4rem] md:text-[3rem]">
+                  Questions officielles<br>de l'examen civique
+                </h1>
+                <p class="mt-3 max-w-2xl text-sm leading-relaxed text-slate-200 sm:text-base">
+                  Entraînez-vous sur l'ensemble des questions officielles, tous thèmes confondus.
+                </p>
+              </div>
+            </div>
+          </section>
+
+          <section class="mb-6 rounded-3xl border border-border bg-white p-5 shadow-card">
+            <h2 class="text-lg font-semibold mb-3">📊 Répartition par thème</h2>
+            <div class="grid grid-cols-2 md:grid-cols-5 gap-3">
+              ${byTheme.map(t => `
+                <div class="rounded-2xl border border-border bg-muted/30 p-3 text-center">
+                  <div class="text-2xl font-bold text-primary">${t.count}</div>
+                  <div class="text-xs text-muted-foreground mt-1">${THEMES[t.n-1].shortTitle}</div>
+                </div>
+              `).join('')}
+            </div>
+          </section>
+
+          <section class="mb-6 rounded-3xl border border-border bg-white p-5 shadow-card">
+            <h2 class="text-lg font-semibold mb-3">⚙️ Configuration du quiz</h2>
+
+            <div class="mb-4">
+              <p class="mb-2 text-xs font-semibold uppercase tracking-[0.16em] text-muted-foreground">Thème</p>
+              <div class="flex flex-wrap gap-2">
+                <button class="theme-chip ${app.selectedTheme === 'all' ? 'active' : ''}" data-theme="all">📚 Tous</button>
+                ${THEMES.map((t, i) => `
+                  <button class="theme-chip ${app.selectedTheme === t.id ? 'active' : ''}" data-theme="${t.id}">${t.icon} ${t.shortTitle}</button>
+                `).join('')}
+              </div>
+            </div>
+
+            <div class="mb-4">
+              <p class="mb-2 text-xs font-semibold uppercase tracking-[0.16em] text-muted-foreground">Nombre de questions</p>
+              <div class="flex flex-wrap gap-2">
+                ${[5,10,15,20,30,40,50].map(n => `
+                  <button class="theme-chip ${app.questionCount === n ? 'active' : ''}" data-count="${n}">${n}</button>
+                `).join('')}
+              </div>
+              <p class="mt-2 text-xs text-muted-foreground">${total} questions disponibles</p>
+            </div>
+          </section>
+
+          <div class="flex flex-col sm:flex-row gap-3 sm:items-center sm:justify-between">
+            <div class="text-sm text-muted-foreground">
+              ${app.questionCount} questions sélectionnées
+            </div>
+            <button id="start-officiel-btn" class="btn-primary min-h-[48px] px-8 text-base shadow-glow" ${total === 0 ? 'disabled' : ''}>
+              🚀 Lancer le quiz officiel
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+    `;
+}
+
+// === LANCEMENT DU QUIZ OFFICIEL ===
+function startQuestionsOfficielles() {
+    if (typeof QUESTIONS_OFFICIELLES === 'undefined' || QUESTIONS_OFFICIELLES.length === 0) {
+        alert("Le fichier questions-officielles.js n'est pas chargé.");
+        return;
+    }
+
+    let filtered = [...QUESTIONS_OFFICIELLES];
+
+    if (app.selectedTheme !== 'all') {
+        const themeNum = THEMES.findIndex(t => t.id === app.selectedTheme) + 1;
+        filtered = filtered.filter(q => q.t === themeNum);
+    }
+
+    let count = Math.min(app.questionCount, filtered.length);
+    if (count < 1) count = 1;
+
+    const selected = shuffleArray(filtered).slice(0, count);
+
+    const config = {
+        getQuestions: () => selected,
+        numOptions: 4,
+        timerSeconds: null,
+        resultMessages: {
+            high: "🎉 Excellent ! Vous maîtrisez les questions officielles.",
+            mid: "💪 Bon travail ! Continuez à réviser.",
+            low: "📚 Révisez les fiches et réessayez."
+        },
+        progressConfig: {
+            bases: [
+                { key: 'db', themes: { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0 }, label: 'Officiel' }
+            ]
+        },
+        type: 'questions-officielles',
+        instantFeedback: true
+    };
+
+    QuizEngine.init(config);
+    renderQuizStructure();
+    document.querySelectorAll('.app-container > section').forEach(el => el.classList.add('hidden'));
+    QuizEngine.startQuiz();
+}
+        // === STRUCTURE DU QUIZ (intégrée au DOM) ===
+        function renderQuizStructure() {
+            // Injecte la structure de quiz (utilisée par QuizEngine) dans le DOM
+            const existing = document.querySelector('.app-container');
+            if (existing) return;
+
+            const container = document.getElementById('app');
+            const quizHTML = `
+            <div class="app-container">
+              <section id="view-home" class="hidden"></section>
+              <section id="view-cours" class="hidden"></section>
+              <section id="view-exam-blanc" class="hidden"></section>
+
+              <!-- Vue Quiz -->
+              <section id="view-quiz" class="hidden">
+                <div class="min-h-screen bg-background text-foreground">
+                  <div class="mx-auto max-w-5xl px-3 py-4 sm:px-4 md:px-6 md:py-6">
+                    <div class="rounded-4xl border border-border bg-panel p-3 shadow-panel sm:p-4 md:p-5">
+                      ${renderNav()}
+
+                      <div class="flex items-center justify-between mb-4">
+                        <div class="flex items-center gap-3">
+                          <button class="flex min-h-[44px] min-w-[44px] items-center justify-center rounded-full border border-border bg-panel text-muted-foreground transition-colors hover:bg-muted" onclick="QuizEngine.showModal()">
+                            ✕
+                          </button>
+                          <div>
+                            <p class="text-sm font-semibold text-foreground" id="quiz-progress">Question 1 / 1</p>
+                            <p class="text-[11px] text-muted-foreground">Quiz</p>
+                          </div>
+                        </div>
+                        <div class="flex items-center gap-3">
+                          ${QuizEngine.config.timerSeconds ? `
+                          <div class="relative w-12 h-12">
+                            <svg viewBox="0 0 50 50" class="transform -rotate-90 w-12 h-12">
+                              <circle cx="25" cy="25" r="22" fill="none" stroke="#e8ebf0" stroke-width="4"/>
+                              <circle id="timer-circle" cx="25" cy="25" r="22" fill="none" stroke="#2b479b" stroke-width="4" stroke-dasharray="138.23" stroke-dashoffset="0" style="transition: stroke-dashoffset 1s linear, stroke 1s linear;"/>
+                            </svg>
+                            <span id="timer-text" class="absolute inset-0 flex items-center justify-center text-xs font-bold text-foreground">45:00</span>
+                          </div>
+                          ` : ''}
+                        </div>
+                      </div>
+
+                      <div class="mb-4">
+                        <div class="progress-bar"><div id="progress-bar" class="fill" style="width:0%"></div></div>
+                      </div>
+
+                      <div id="question-container">
+                        <div class="rounded-3xl border border-border bg-white p-5 sm:p-6 mb-4">
+                          <p id="question-text" class="text-lg font-medium leading-relaxed text-foreground sm:text-xl">Question</p>
+                        </div>
+
+                        <div id="options-list" class="space-y-3 mb-4"></div>
+
+                        <div id="feedback-area" class="hidden slide-up rounded-3xl border border-primary/10 bg-accent p-4 mb-4">
+                          <p id="feedback-title" class="font-semibold">Explication</p>
+                          <p id="feedback-text" class="text-sm leading-relaxed text-foreground mt-1"></p>
+                        </div>
+
+                        <div class="flex justify-end">
+                          <button id="btn-next" class="btn-primary min-h-[48px] px-6 text-sm" onclick="QuizEngine.nextQuestion()" disabled>Question suivante →</button>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </section>
+
+              <!-- Vue Résultats -->
+              <section id="view-results" class="hidden">
+                <div class="min-h-screen bg-background text-foreground">
+                  <div class="mx-auto max-w-5xl px-3 py-4 sm:px-4 md:px-6 md:py-6">
+                    <div class="rounded-4xl border border-border bg-panel p-3 shadow-panel sm:p-4 md:p-5">
+                      ${renderNav()}
+
+                      <div class="text-center mb-6">
+                        <div class="relative inline-block">
+                          <div id="score-ring" class="w-32 h-32 rounded-full border-8 border-border" style="background: conic-gradient(#2b479b 0%, #e8ebf0 0); transition: background 0.5s ease;"></div>
+                          <span id="score-percent" class="absolute inset-0 flex items-center justify-center text-3xl font-bold">0%</span>
+                        </div>
+                        <h2 id="result-title" class="text-2xl font-bold mt-4">Terminé !</h2>
+                        <p id="result-subtitle" class="text-muted-foreground">Voici votre résultat.</p>
+                        <p id="result-message" class="mt-2 text-sm"></p>
+                      </div>
+
+                      <h3 class="text-lg font-semibold text-foreground mb-3">📝 Correction détaillée</h3>
+                      <div id="review-list" class="space-y-3 mb-6"></div>
+
+                      <div id="progress-dashboard" class="mb-6"></div>
+
+                      <div class="flex flex-wrap gap-3 justify-center">
+                        <button id="retry-exam" class="btn-primary min-h-[48px] px-6 text-sm" onclick="QuizEngine.config.type === 'exam-blanc' ? startExamBlanc() : QuizEngine.retryQuiz()">🔄 Recommencer</button>
+                        <button class="btn-outline min-h-[48px] px-6 text-sm" onclick="QuizEngine.switchView('view-home'); render();">🏠 Accueil</button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </section>
+
+              <!-- Confetti container -->
+              <div id="confetti-container" style="position:fixed; top:0; left:0; width:100%; height:100%; pointer-events:none; z-index:9999;"></div>
+
+              <!-- Modal abandon -->
+              <div id="modal-abandon" class="modal-overlay" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+                <div class="modal-box">
+                  <h3 id="modal-title">Abandonner le quiz ?</h3>
+                  <p>Votre progression ne sera pas sauvegardée.</p>
+                  <div class="modal-btn-group">
+                    <button class="modal-btn-cancel" onclick="QuizEngine.closeModal()">Continuer</button>
+                    <button class="modal-btn-confirm" onclick="QuizEngine.confirmAbandon()">Abandonner</button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          `;
+
+            container.innerHTML = quizHTML;
+        }
+
+        // ============================================================
+        // HELPERS
+        // ============================================================
+        function shuffleArray(arr) {
+            const a = [...arr];
+            for (let i = a.length - 1; i > 0; i--) {
+                const j = Math.floor(Math.random() * (i + 1));
+                [a[i], a[j]] = [a[j], a[i]];
+            }
+            return a;
+        }
+
+        function getThemeById(id) {
+            return THEMES.find(t => t.id === id);
+        }
+
+        function getThemeNum(id) {
+            const idx = THEMES.findIndex(t => t.id === id);
+            return idx + 1; // 1-5
+        }
+
+        function getThemeId(num) {
+            return THEMES[num - 1] ? THEMES[num - 1].id : null;
+        }
+
+        function getFilteredQuestions() {
+            let filtered = [];
+
+            // Ajouter les questions de DB
+            const allDB = DB.map(q => ({
+                ...q,
+                _themeId: getThemeId(q.t),
+                _type: 'general'
+            }));
+
+            // Ajouter les questions de DB_SITUATIONS
+            const allSit = DB_SITUATIONS.map(q => ({
+                ...q,
+                _themeId: getThemeId(q.t),
+                _type: 'situational',
+                lvl: q.lvl || 'B1' // par défaut
+            }));
+
+            let all = [...allDB, ...allSit];
+
+            if (app.selectedTheme !== 'all') {
+                all = all.filter(q => q._themeId === app.selectedTheme);
+            }
+            if (app.selectedDifficulty !== 'all') {
+                all = all.filter(q => q.lvl === app.selectedDifficulty);
+            }
+            if (app.filterType === 'general') {
+                all = all.filter(q => q._type === 'general');
+            } else if (app.filterType === 'situational') {
+                all = all.filter(q => q._type === 'situational');
+            }
+
+            return all;
+        }
+
+        // ============================================================
+        // EVENTS
+        // ============================================================
+        function bindEvents() {
+            // Navigation
+            document.querySelectorAll('[data-nav]').forEach(el => {
+                el.addEventListener('click', () => {
+                    const target = el.dataset.nav;
+                    app.view = target;
+                    if (target === 'cours') {
+                        app.coursTheme = null;
+                    }
+                    render();
+                });
+            });
+
+            // Cours
+            document.querySelectorAll('[data-cours-theme]').forEach(el => {
+                el.addEventListener('click', () => {
+                    app.coursTheme = el.dataset.coursTheme;
+                    render();
+                });
+            });
+
+            document.querySelectorAll('[data-cours-back]').forEach(el => {
+                el.addEventListener('click', () => {
+                    app.coursTheme = null;
+                    render();
+                });
+            });
+
+            // Home filters
+            document.querySelectorAll('[data-theme]').forEach(el => {
+                el.addEventListener('click', () => {
+                    app.selectedTheme = el.dataset.theme;
+                    render();
+                });
+            });
+
+            document.querySelectorAll('[data-difficulty]').forEach(el => {
+                el.addEventListener('click', () => {
+                    app.selectedDifficulty = el.dataset.difficulty;
+                    render();
+                });
+            });
+
+            document.querySelectorAll('[data-type]').forEach(el => {
+                el.addEventListener('click', () => {
+                    app.filterType = el.dataset.type;
+                    render();
+                });
+            });
+
+            document.querySelectorAll('[data-count]').forEach(el => {
+                el.addEventListener('click', () => {
+                    app.questionCount = parseInt(el.dataset.count, 10);
+                    render();
+                });
+            });
+
+            const customCount = document.getElementById('custom-count');
+            if (customCount) {
+                customCount.addEventListener('change', () => {
+                    const val = parseInt(customCount.value, 10);
+                    if (!isNaN(val) && val > 0) app.questionCount = val;
+                    render();
+                });
+            }
+
+            // Lancer quiz personnalisé
+            const startBtn = document.getElementById('start-quiz-btn');
+            if (startBtn) {
+                startBtn.addEventListener('click', startPersonalizedQuiz);
+            }
+
+            // Lancer examen blanc
+            const examBtn = document.getElementById('start-exam-blanc');
+            if (examBtn) {
+                examBtn.addEventListener('click', startExamBlanc);
+            }
+
+            // Le bouton "Recommencer" est câblé directement en HTML (onclick)
+            // dans renderQuizStructure(), car il n'existe pas encore au moment
+            // où bindEvents() tourne pour la première fois.
+
+            // Gestion du modal (déjà dans QuizEngine)
+			
+			// Lancer quiz questions officielles
+			const officielBtn = document.getElementById('start-officiel-btn');
+			if (officielBtn) {
+				officielBtn.addEventListener('click', startQuestionsOfficielles);
+				}
+        }
+
+        // ============================================================
+        // LANCEMENT DES QUIZ
+        // ============================================================
+        function startPersonalizedQuiz() {
+            const filtered = getFilteredQuestions();
+            if (filtered.length === 0) return;
+
+            let count = Math.min(app.questionCount, filtered.length);
+            if (count < 1) count = 1;
+
+            const selected = shuffleArray(filtered).slice(0, count);
+
+            // Configurer le moteur
+            const config = {
+                getQuestions: () => selected,
+                numOptions: 4,
+                timerSeconds: null, // pas de timer pour les quiz personnalisés
+                resultMessages: {
+                    high: "🎉 Excellent résultat ! Vous maîtrisez le sujet.",
+                    mid: "💪 Bon travail ! Continuez à réviser.",
+                    low: "📚 N'hésitez pas à revoir les fiches correspondantes."
+                },
+                progressConfig: {
+                    bases: [
+                        { key: 'db', themes: { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0 }, label: 'Général' },
+                        { key: 'sit', themes: { 1: 0, 3: 0 }, label: 'Situation' }
+                    ]
+                },
+                type: 'personalized',
+                instantFeedback: true // correction affichée après chaque question
+            };
+
+            QuizEngine.init(config);
+            // Injecter la structure si absente
+            renderQuizStructure();
+            // S'assurer que la vue home est masquée
+            document.querySelectorAll('.app-container > section').forEach(el => el.classList.add('hidden'));
+            QuizEngine.startQuiz();
+        }
+
+        function startExamBlanc() {
+            // Sélectionner 40 questions aléatoires de DB + DB_SITUATIONS (mix)
+            const allQuestions = [...DB, ...DB_SITUATIONS];
+            const shuffled = shuffleArray(allQuestions);
+            const selected = shuffled.slice(0, Math.min(40, shuffled.length));
+
+            // Configurer le moteur pour examen blanc
+            const config = {
+                getQuestions: () => selected,
+                numOptions: 4,
+                timerSeconds: 45 * 60, // 45 minutes
+                resultMessages: {
+                    high: "🎉 Félicitations ! Vous avez réussi l'examen blanc.",
+                    mid: "💪 Pas loin ! Continuez à réviser les thèmes faibles.",
+                    low: "📚 Entraînez-vous davantage avec les quiz personnalisés."
+                },
+                progressConfig: {
+                    bases: [
+                        { key: 'db', themes: { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0 }, label: 'Général' },
+                        { key: 'sit', themes: { 1: 0, 3: 0 }, label: 'Situation' }
+                    ]
+                },
+                type: 'exam-blanc',
+                instantFeedback: false // aucune correction avant la fin, comme un examen réel
+            };
+
+            QuizEngine.init(config);
+            renderQuizStructure();
+            document.querySelectorAll('.app-container > section').forEach(el => el.classList.add('hidden'));
+            QuizEngine.startQuiz();
+        }
+
+        // ============================================================
+        // INIT
+        // ============================================================
+        // On initialise avec la vue home
+        render();
+        console.log('🏛️ Examen Civique - Quiz & Fiches avec Examen Blanc');
+        if (typeof QUESTIONS !== 'undefined') {
+            console.log(`📚 ${QUESTIONS.length} questions chargées`);
+            console.log(`🧩 ${QUESTIONS.filter(q => q.situational).length} questions marquées comme situationnelles`);
+        }
+        console.log(`📖 ${Object.keys(COURS_DATA).length} fiches de révision disponibles`);
+        console.log(`📚 ${DB.length} questions générales, ${DB_SITUATIONS.length} situationnelles`);
+    </script>
+
+</body>
+</html>
